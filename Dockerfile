@@ -36,8 +36,9 @@ COPY --from=builder --chown=1000:1000 /app/mcp-grafana /app/
 # Use the non-root user
 USER mcp-grafana
 
-# Expose the port the app runs on
-EXPOSE 8000
+# Default port (can be overridden via MCP_SERVER_PORT env var)
+EXPOSE 8443
 
-# Run the application
-ENTRYPOINT ["/app/mcp-grafana", "--transport", "sse", "--address", "0.0.0.0:8000"]
+# Run the application - it reads config from env vars automatically
+# No arguments needed: uses streamable-http transport, reads port from MCP_SERVER_PORT (default 8443)
+ENTRYPOINT ["/app/mcp-grafana"]

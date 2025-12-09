@@ -1,0 +1,31 @@
+# MCP Grafana Self-Hosted Server Configuration
+# Copy this file to config.yaml and update the values
+# Environment variables take precedence over config file values
+
+# Grafana connection settings
+grafana_url: "http://localhost:3000"
+grafana_service_account_token: ""  # Or set GRAFANA_SERVICE_ACCOUNT_TOKEN env var
+
+# MCP Server authentication
+# Generate a token with: openssl rand -hex 32
+mcp_auth_token: "23a59a20960fcece70b87ae75e4f3cdc799c8e1ab27f837b9b54b73237797dba"
+
+# Server settings
+server_port: "8443"   # Port for the server (or set MCP_SERVER_PORT env var)
+base_path: ""         # Base path for the server
+endpoint_path: "/mcp" # Endpoint path for the server
+
+# Logging
+log_level: "info"  # Options: debug, info, warn, error
+debug: false       # Enable debug mode for Grafana transport
+
+# Client TLS (for connecting to Grafana)
+tls_cert_file: ""
+tls_key_file: ""
+tls_ca_file: ""
+tls_skip_verify: false
+
+# Server TLS (for HTTPS)
+server_tls_cert_file: ""
+server_tls_key_file: ""
+

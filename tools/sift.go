@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -25,22 +24,7 @@ const (
 	investigationStatusFailed   investigationStatus = "failed"
 )
 
-// errorPatternLogExampleLimit controls how many log examples are fetched per error pattern.
-const errorPatternLogExampleLimit = 3
-
 type analysisStatus string
-
-type investigationRequest struct {
-	AlertLabels map[string]string `json:"alertLabels,omitempty"`
-	Labels      map[string]string `json:"labels"`
-
-	Start time.Time `json:"start"`
-	End   time.Time `json:"end"`
-
-	QueryURL string `json:"queryUrl"`
-
-	Checks []string `json:"checks"`
-}
 
 // Interesting: The analysis complete with results that indicate a probable cause for failure.
 type analysisResult struct {
@@ -142,14 +126,6 @@ func siftClientFromContext(ctx context.Context) (*siftClient, error) {
 	}
 	return client, nil
 }
-
-// checkType represents the type of analysis check to perform.
-type checkType string
-
-const (
-	checkTypeErrorPatternLogs checkType = "ErrorPatternLogs"
-	checkTypeSlowRequests     checkType = "SlowRequests"
-)
 
 // GetSiftInvestigationParams defines the parameters for retrieving an investigation
 type GetSiftInvestigationParams struct {
@@ -264,167 +240,11 @@ var ListSiftInvestigations = mcpgrafana.MustTool(
 	mcp.WithReadOnlyHintAnnotation(true),
 )
 
-// FindErrorPatternLogsParams defines the parameters for running an ErrorPatternLogs check
-type FindErrorPatternLogsParams struct {
-	Name   string            `json:"name" jsonschema:"required,description=The name of the investigation"`
-	Labels map[string]string `json:"labels" jsonschema:"required,description=Labels to scope the analysis"`
-	Start  time.Time         `json:"start,omitempty" jsonschema:"description=Start time for the investigation. Defaults to 30 minutes ago if not specified."`
-	End    time.Time         `json:"end,omitempty" jsonschema:"description=End time for the investigation. Defaults to now if not specified."`
-}
-
-// findErrorPatternLogs creates an investigation with ErrorPatternLogs check, waits for it to complete, and returns the analysis
-func findErrorPatternLogs(ctx context.Context, args FindErrorPatternLogsParams) (*analysis, error) {
-	client, err := siftClientFromContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("creating Sift client: %w", err)
-	}
-
-	// Create the investigation request with ErrorPatternLogs check
-	requestData := investigationRequest{
-		Labels: args.Labels,
-		Start:  args.Start,
-		End:    args.End,
-		Checks: []string{string(checkTypeErrorPatternLogs)},
-	}
-
-	investigation := &Investigation{
-		Name:       args.Name,
-		GrafanaURL: client.url,
-		Status:     investigationStatusPending,
-	}
-
-	// Create the investigation and wait for it to complete
-	completedInvestigation, err := client.createSiftInvestigation(ctx, investigation, requestData)
-	if err != nil {
-		return nil, fmt.Errorf("creating investigation: %w", err)
-	}
-
-	// Get all analyses from the completed investigation
-	slog.Debug("Getting analyses", "investigation_id", completedInvestigation.ID)
-	analyses, err := client.getSiftAnalyses(ctx, completedInvestigation.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting analyses: %w", err)
-	}
-
-	// Find the ErrorPatternLogs analysis
-	var errorPatternLogsAnalysis *analysis
-	for i := range analyses {
-		if analyses[i].Name == string(checkTypeErrorPatternLogs) {
-			errorPatternLogsAnalysis = &analyses[i]
-			break
-		}
-	}
-
-	if errorPatternLogsAnalysis == nil {
-		return nil, fmt.Errorf("ErrorPatternLogs analysis not found in investigation %s", completedInvestigation.ID)
-	}
-	slog.Debug("Found ErrorPatternLogs analysis", "analysis_id", errorPatternLogsAnalysis.ID)
-
-	datasourceUID := completedInvestigation.Datasources.LokiDatasource.UID
-
-	if errorPatternLogsAnalysis.Result.Details == nil {
-		// No patterns found, return the analysis without examples
-		return errorPatternLogsAnalysis, nil
-	}
-	for _, pattern := range errorPatternLogsAnalysis.Result.Details["patterns"].([]any) {
-		patternMap, ok := pattern.(map[string]any)
-		if !ok {
-			continue
-		}
-		examples, err := fetchErrorPatternLogExamples(ctx, patternMap, datasourceUID)
-		if err != nil {
-			return nil, err
-		}
-		patternMap["examples"] = examples
-	}
-
-	return errorPatternLogsAnalysis, nil
-}
-
-// FindErrorPatternLogs is a tool for running an ErrorPatternLogs check
-var FindErrorPatternLogs = mcpgrafana.MustTool(
-	"find_error_pattern_logs",
-	"Searches Loki logs for elevated error patterns compared to the last day's average, waits for the analysis to complete, and returns the results including any patterns found.",
-	findErrorPatternLogs,
-	mcp.WithTitleAnnotation("Find error patterns in logs"),
-	mcp.WithReadOnlyHintAnnotation(true),
-)
-
-// FindSlowRequestsParams defines the parameters for running an SlowRequests check
-type FindSlowRequestsParams struct {
-	Name   string            `json:"name" jsonschema:"required,description=The name of the investigation"`
-	Labels map[string]string `json:"labels" jsonschema:"required,description=Labels to scope the analysis"`
-	Start  time.Time         `json:"start,omitempty" jsonschema:"description=Start time for the investigation. Defaults to 30 minutes ago if not specified."`
-	End    time.Time         `json:"end,omitempty" jsonschema:"description=End time for the investigation. Defaults to now if not specified."`
-}
-
-// findSlowRequests creates an investigation with SlowRequests check, waits for it to complete, and returns the analysis
-func findSlowRequests(ctx context.Context, args FindSlowRequestsParams) (*analysis, error) {
-	client, err := siftClientFromContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("creating Sift client: %w", err)
-	}
-
-	// Create the investigation request with SlowRequests check
-	requestData := investigationRequest{
-		Labels: args.Labels,
-		Start:  args.Start,
-		End:    args.End,
-		Checks: []string{string(checkTypeSlowRequests)},
-	}
-
-	investigation := &Investigation{
-		Name:       args.Name,
-		GrafanaURL: client.url,
-		Status:     investigationStatusPending,
-	}
-
-	// Create the investigation and wait for it to complete
-	completedInvestigation, err := client.createSiftInvestigation(ctx, investigation, requestData)
-	if err != nil {
-		return nil, fmt.Errorf("creating investigation: %w", err)
-	}
-
-	// Get all analyses from the completed investigation
-	analyses, err := client.getSiftAnalyses(ctx, completedInvestigation.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting analyses: %w", err)
-	}
-
-	// Find the SlowRequests analysis
-	var slowRequestsAnalysis *analysis
-	for i := range analyses {
-		if analyses[i].Name == string(checkTypeSlowRequests) {
-			slowRequestsAnalysis = &analyses[i]
-			break
-		}
-	}
-
-	if slowRequestsAnalysis == nil {
-		return nil, fmt.Errorf("SlowRequests analysis not found in investigation %s", completedInvestigation.ID)
-	}
-
-	return slowRequestsAnalysis, nil
-}
-
-// FindSlowRequests is a tool for running an SlowRequests check
-var FindSlowRequests = mcpgrafana.MustTool(
-	"find_slow_requests",
-	"Searches relevant Tempo datasources for slow requests, waits for the analysis to complete, and returns the results.",
-	findSlowRequests,
-	mcp.WithTitleAnnotation("Find slow requests"),
-	mcp.WithReadOnlyHintAnnotation(true),
-)
-
 // AddSiftTools registers all Sift tools with the MCP server
-func AddSiftTools(mcp *server.MCPServer, enableWriteTools bool) {
+func AddSiftTools(mcp *server.MCPServer) {
 	GetSiftInvestigation.Register(mcp)
 	GetSiftAnalysis.Register(mcp)
 	ListSiftInvestigations.Register(mcp)
-	if enableWriteTools {
-		FindErrorPatternLogs.Register(mcp)
-		FindSlowRequests.Register(mcp)
-	}
 }
 
 // makeRequest is a helper method to make HTTP requests and handle common response patterns
@@ -494,75 +314,6 @@ func (c *siftClient) getSiftInvestigation(ctx context.Context, id uuid.UUID) (*I
 	return &investigationResponse.Data, nil
 }
 
-func (c *siftClient) createSiftInvestigation(ctx context.Context, investigation *Investigation, requestData investigationRequest) (*Investigation, error) {
-	// Set default time range to last 30 minutes if not provided
-	if requestData.Start.IsZero() {
-		requestData.Start = time.Now().Add(-30 * time.Minute)
-	}
-	if requestData.End.IsZero() {
-		requestData.End = time.Now()
-	}
-
-	// Create the payload including the necessary fields for the API
-	payload := struct {
-		Investigation
-		RequestData investigationRequest `json:"requestData"`
-	}{
-		Investigation: *investigation,
-		RequestData:   requestData,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling investigation: %w", err)
-	}
-
-	slog.Debug("Creating investigation", "payload", string(jsonData))
-	buf, err := c.makeRequest(ctx, "POST", "/api/plugins/grafana-ml-app/resources/sift/api/v1/investigations", jsonData)
-	if err != nil {
-		return nil, err
-	}
-	slog.Debug("Investigation created", "response", string(buf))
-
-	investigationResponse := struct {
-		Status string        `json:"status"`
-		Data   Investigation `json:"data"`
-	}{}
-
-	if err := json.Unmarshal(buf, &investigationResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response body: %w. body: %s", err, buf)
-	}
-
-	// Poll for investigation completion
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	timeout := time.After(5 * time.Minute)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("context cancelled while waiting for investigation completion")
-		case <-timeout:
-			return nil, fmt.Errorf("timeout waiting for investigation completion after 5 minutes")
-		case <-ticker.C:
-			slog.Debug("Polling investigation status", "investigation_id", investigationResponse.Data.ID)
-			investigation, err := c.getSiftInvestigation(ctx, investigationResponse.Data.ID)
-			if err != nil {
-				return nil, err
-			}
-
-			if investigation.Status == investigationStatusFailed {
-				return nil, fmt.Errorf("investigation failed: %s", investigation.FailureReason)
-			}
-
-			if investigation.Status == investigationStatusFinished {
-				return investigation, nil
-			}
-		}
-	}
-}
-
 // getSiftAnalyses is a helper method to get all analyses from an investigation
 func (c *siftClient) getSiftAnalyses(ctx context.Context, investigationID uuid.UUID) ([]analysis, error) {
 	path := fmt.Sprintf("/api/plugins/grafana-ml-app/resources/sift/api/v1/investigations/%s/analyses", investigationID)
@@ -625,23 +376,4 @@ func (c *siftClient) listSiftInvestigations(ctx context.Context, limit int) ([]I
 	}
 
 	return response.Data, nil
-}
-
-func fetchErrorPatternLogExamples(ctx context.Context, patternMap map[string]any, datasourceUID string) ([]string, error) {
-	query, _ := patternMap["query"].(string)
-	logEntries, err := queryLokiLogs(ctx, QueryLokiLogsParams{
-		DatasourceUID: datasourceUID,
-		LogQL:         query,
-		Limit:         errorPatternLogExampleLimit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("querying Loki: %w", err)
-	}
-	var examples []string
-	for _, entry := range logEntries {
-		if entry.Line != "" {
-			examples = append(examples, entry.Line)
-		}
-	}
-	return examples, nil
 }

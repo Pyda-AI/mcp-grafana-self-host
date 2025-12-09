@@ -6,56 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func TestGenerateSecureToken(t *testing.T) {
-	t.Run("generates unique tokens", func(t *testing.T) {
-		token1, err := GenerateSecureToken()
-		require.NoError(t, err)
-
-		token2, err := GenerateSecureToken()
-		require.NoError(t, err)
-
-		// Tokens should be different
-		assert.NotEqual(t, token1, token2)
-
-		// Tokens should be 64 hex characters (32 bytes = 256 bits)
-		assert.Len(t, token1, 64)
-		assert.Len(t, token2, 64)
-	})
-
-	t.Run("MustGenerateSecureToken returns valid token", func(t *testing.T) {
-		token := MustGenerateSecureToken()
-		assert.Len(t, token, 64)
-	})
-}
-
-func TestResolveAuthToken(t *testing.T) {
-	t.Run("empty value returns empty", func(t *testing.T) {
-		token, err := ResolveAuthToken("")
-		require.NoError(t, err)
-		assert.Empty(t, token)
-	})
-
-	t.Run("auto generates token", func(t *testing.T) {
-		token, err := ResolveAuthToken("auto")
-		require.NoError(t, err)
-		assert.Len(t, token, 64)
-	})
-
-	t.Run("AUTO generates token (case insensitive)", func(t *testing.T) {
-		token, err := ResolveAuthToken("AUTO")
-		require.NoError(t, err)
-		assert.Len(t, token, 64)
-	})
-
-	t.Run("explicit value is returned", func(t *testing.T) {
-		token, err := ResolveAuthToken("my-secret-token")
-		require.NoError(t, err)
-		assert.Equal(t, "my-secret-token", token)
-	})
-}
 
 func TestSecureTokenCompare(t *testing.T) {
 	t.Run("equal tokens return true", func(t *testing.T) {

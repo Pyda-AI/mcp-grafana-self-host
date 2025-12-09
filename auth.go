@@ -1,24 +1,15 @@
 package mcpgrafana
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 )
 
 const (
-	// SecureTokenBytes is the number of bytes for generated tokens (256-bit entropy)
-	SecureTokenBytes = 32
-
 	// AuthTokenEnvVar is the environment variable for configuring the Bearer token
 	AuthTokenEnvVar = "MCP_AUTH_TOKEN"
-
-	// AuthTokenAuto is the special value that triggers automatic token generation
-	AuthTokenAuto = "auto"
 )
 
 // AuthConfig holds configuration for Bearer token authentication.
@@ -27,32 +18,8 @@ type AuthConfig struct {
 	// If empty, authentication is disabled.
 	Token string
 
-	// ShowToken controls whether to print the token on startup.
-	ShowToken bool
-
 	// PublicPaths are paths that don't require authentication (e.g., /healthz)
 	PublicPaths []string
-}
-
-// GenerateSecureToken generates a cryptographically secure random token.
-// It uses crypto/rand to generate SecureTokenBytes (32) bytes of random data,
-// providing 256 bits of entropy. The token is returned as a hex-encoded string.
-func GenerateSecureToken() (string, error) {
-	bytes := make([]byte, SecureTokenBytes)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("failed to generate secure token: %w", err)
-	}
-	return hex.EncodeToString(bytes), nil
-}
-
-// MustGenerateSecureToken generates a secure token and panics on error.
-// Use this only during initialization where failure should be fatal.
-func MustGenerateSecureToken() string {
-	token, err := GenerateSecureToken()
-	if err != nil {
-		panic(err)
-	}
-	return token
 }
 
 // NewBearerAuthMiddleware creates HTTP middleware that validates Bearer token authentication.
@@ -116,45 +83,12 @@ func secureTokenCompare(expected, provided string) bool {
 	return subtle.ConstantTimeCompare(expectedBytes, providedBytes) == 1
 }
 
-// ResolveAuthToken resolves the authentication token from the provided value.
-// If the value is "auto", it generates a new secure token.
-// If the value is empty, authentication is disabled.
-// Otherwise, the provided value is used as the token.
-func ResolveAuthToken(value string) (string, error) {
-	if value == "" {
-		return "", nil
-	}
-	if strings.ToLower(value) == AuthTokenAuto {
-		return GenerateSecureToken()
-	}
-	return value, nil
-}
-
-// PrintTokenInfo logs token information based on configuration.
-// If showToken is true, it prints the full token for copying.
-// Otherwise, it just confirms that authentication is enabled.
-func PrintTokenInfo(token string, showToken bool) {
+// LogAuthStatus logs the authentication status on startup.
+func LogAuthStatus(token string) {
 	if token == "" {
 		slog.Info("Bearer token authentication is DISABLED - all requests will be accepted")
 		return
 	}
-
-	if showToken {
-		// Print token in a format that's easy to copy
-		fmt.Println()
-		fmt.Println("╔══════════════════════════════════════════════════════════════════════════════╗")
-		fmt.Println("║                        MCP SERVER AUTHENTICATION TOKEN                       ║")
-		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-		fmt.Printf("║ Token: %-70s ║\n", token)
-		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-		fmt.Println("║ Copy this token and provide it to your MCP client.                          ║")
-		fmt.Println("║ Include it in the Authorization header as: Bearer <token>                   ║")
-		fmt.Println("╚══════════════════════════════════════════════════════════════════════════════╝")
-		fmt.Println()
-	} else {
-		slog.Info("Bearer token authentication is ENABLED",
-			"token_length", len(token),
-			"hint", "use --show-token to display the token")
-	}
+	slog.Info("Bearer token authentication is ENABLED", "token_length", len(token))
 }
 

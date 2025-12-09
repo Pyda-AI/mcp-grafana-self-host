@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -16,10 +17,105 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"gopkg.in/yaml.v3"
 
 	mcpgrafana "github.com/grafana/mcp-grafana"
 	"github.com/grafana/mcp-grafana/tools"
 )
+
+// loadEnvFile loads environment variables from a .env file if it exists.
+// Environment variables already set take precedence (won't be overwritten).
+func loadEnvFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // .env file doesn't exist, that's fine
+		}
+		return fmt.Errorf("failed to open .env file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		
+		// Parse KEY=VALUE
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		
+		// Remove surrounding quotes if present
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		
+		// Only set if not already set (env vars take precedence)
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
+	
+	return scanner.Err()
+}
+
+// Config represents the YAML configuration file structure
+type Config struct {
+	GrafanaURL                  string `yaml:"grafana_url"`
+	GrafanaServiceAccountToken  string `yaml:"grafana_service_account_token"`
+	MCPAuthToken                string `yaml:"mcp_auth_token"`
+	ServerPort                  string `yaml:"server_port"`
+	BasePath                    string `yaml:"base_path"`
+	EndpointPath                string `yaml:"endpoint_path"`
+	LogLevel                    string `yaml:"log_level"`
+	Debug                       bool   `yaml:"debug"`
+	TLSCertFile                 string `yaml:"tls_cert_file"`
+	TLSKeyFile                  string `yaml:"tls_key_file"`
+	TLSCAFile                   string `yaml:"tls_ca_file"`
+	TLSSkipVerify               bool   `yaml:"tls_skip_verify"`
+	ServerTLSCertFile           string `yaml:"server_tls_cert_file"`
+	ServerTLSKeyFile            string `yaml:"server_tls_key_file"`
+}
+
+// loadConfig loads configuration from config.yaml if it exists
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // Config file doesn't exist, use defaults
+		}
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	return &config, nil
+}
+
+// getConfigValue returns value from: 1) env var, 2) config file, 3) default
+func getConfigValue(envVar string, configValue string, defaultValue string) string {
+	if v := os.Getenv(envVar); v != "" {
+		return v
+	}
+	if configValue != "" {
+		return configValue
+	}
+	return defaultValue
+}
 
 func maybeAddTools(s *server.MCPServer, tf func(*server.MCPServer), enabledTools []string, disable bool, category string) {
 	if !slices.Contains(enabledTools, category) {
@@ -41,7 +137,7 @@ type disabledTools struct {
 	search, datasource, incident,
 	prometheus, loki, alerting,
 	dashboard, folder, oncall, asserts, sift, admin,
-	pyroscope, navigation, proxied, annotations, write bool
+	pyroscope, navigation, proxied, annotations, tempo, mimir bool
 }
 
 // Configuration for the Grafana client.
@@ -56,33 +152,9 @@ type grafanaConfig struct {
 	tlsSkipVerify bool
 }
 
-// authConfig holds configuration for Bearer token authentication.
-type authConfig struct {
-	// token is the Bearer token for authenticating incoming requests.
-	// If empty, authentication is disabled.
-	// If "auto", a secure token is generated automatically.
-	token string
-
-	// showToken controls whether to print the token on startup.
-	showToken bool
-}
-
-func (ac *authConfig) addFlags() {
-	flag.StringVar(&ac.token, "auth-token", "", "Bearer token for authenticating incoming MCP requests. Use 'auto' to generate a secure token. Can also be set via MCP_AUTH_TOKEN env var.")
-	flag.BoolVar(&ac.showToken, "show-token", false, "Print the authentication token on startup for easy copying")
-}
-
-// resolveToken resolves the final token value, checking env var first, then flag.
-func (ac *authConfig) resolveToken() (string, error) {
-	// Environment variable takes precedence
-	if envToken := os.Getenv(mcpgrafana.AuthTokenEnvVar); envToken != "" {
-		return mcpgrafana.ResolveAuthToken(envToken)
-	}
-	return mcpgrafana.ResolveAuthToken(ac.token)
-}
 
 func (dt *disabledTools) addFlags() {
-	flag.StringVar(&dt.enabledTools, "enabled-tools", "search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,admin,pyroscope,navigation,proxied,annotations", "A comma separated list of tools enabled for this server. Can be overwritten entirely or by disabling specific components, e.g. --disable-search.")
+	flag.StringVar(&dt.enabledTools, "enabled-tools", "search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,admin,pyroscope,navigation,proxied,annotations,tempo,mimir", "A comma separated list of tools enabled for this server. Can be overwritten entirely or by disabling specific components, e.g. --disable-search.")
 	flag.BoolVar(&dt.search, "disable-search", false, "Disable search tools")
 	flag.BoolVar(&dt.datasource, "disable-datasource", false, "Disable datasource tools")
 	flag.BoolVar(&dt.incident, "disable-incident", false, "Disable incident tools")
@@ -98,8 +170,9 @@ func (dt *disabledTools) addFlags() {
 	flag.BoolVar(&dt.pyroscope, "disable-pyroscope", false, "Disable pyroscope tools")
 	flag.BoolVar(&dt.navigation, "disable-navigation", false, "Disable navigation tools")
 	flag.BoolVar(&dt.proxied, "disable-proxied", false, "Disable proxied tools (tools from external MCP servers)")
-	flag.BoolVar(&dt.write, "disable-write", false, "Disable write tools (create/update operations)")
 	flag.BoolVar(&dt.annotations, "disable-annotations", false, "Disable annotation tools")
+	flag.BoolVar(&dt.tempo, "disable-tempo", false, "Disable tempo tools")
+	flag.BoolVar(&dt.mimir, "disable-mimir", false, "Disable mimir tools")
 }
 
 func (gc *grafanaConfig) addFlags() {
@@ -114,22 +187,23 @@ func (gc *grafanaConfig) addFlags() {
 
 func (dt *disabledTools) addTools(s *server.MCPServer) {
 	enabledTools := strings.Split(dt.enabledTools, ",")
-	enableWriteTools := !dt.write
 	maybeAddTools(s, tools.AddSearchTools, enabledTools, dt.search, "search")
 	maybeAddTools(s, tools.AddDatasourceTools, enabledTools, dt.datasource, "datasource")
-	maybeAddTools(s, func(mcp *server.MCPServer) { tools.AddIncidentTools(mcp, enableWriteTools) }, enabledTools, dt.incident, "incident")
+	maybeAddTools(s, tools.AddIncidentTools, enabledTools, dt.incident, "incident")
 	maybeAddTools(s, tools.AddPrometheusTools, enabledTools, dt.prometheus, "prometheus")
 	maybeAddTools(s, tools.AddLokiTools, enabledTools, dt.loki, "loki")
-	maybeAddTools(s, func(mcp *server.MCPServer) { tools.AddAlertingTools(mcp, enableWriteTools) }, enabledTools, dt.alerting, "alerting")
-	maybeAddTools(s, func(mcp *server.MCPServer) { tools.AddDashboardTools(mcp, enableWriteTools) }, enabledTools, dt.dashboard, "dashboard")
-	maybeAddTools(s, func(mcp *server.MCPServer) { tools.AddFolderTools(mcp, enableWriteTools) }, enabledTools, dt.folder, "folder")
+	maybeAddTools(s, tools.AddAlertingTools, enabledTools, dt.alerting, "alerting")
+	maybeAddTools(s, tools.AddDashboardTools, enabledTools, dt.dashboard, "dashboard")
+	maybeAddTools(s, tools.AddFolderTools, enabledTools, dt.folder, "folder")
 	maybeAddTools(s, tools.AddOnCallTools, enabledTools, dt.oncall, "oncall")
 	maybeAddTools(s, tools.AddAssertsTools, enabledTools, dt.asserts, "asserts")
-	maybeAddTools(s, func(mcp *server.MCPServer) { tools.AddSiftTools(mcp, enableWriteTools) }, enabledTools, dt.sift, "sift")
+	maybeAddTools(s, tools.AddSiftTools, enabledTools, dt.sift, "sift")
 	maybeAddTools(s, tools.AddAdminTools, enabledTools, dt.admin, "admin")
 	maybeAddTools(s, tools.AddPyroscopeTools, enabledTools, dt.pyroscope, "pyroscope")
 	maybeAddTools(s, tools.AddNavigationTools, enabledTools, dt.navigation, "navigation")
-	maybeAddTools(s, func(mcp *server.MCPServer) { tools.AddAnnotationTools(mcp, enableWriteTools) }, enabledTools, dt.annotations, "annotations")
+	maybeAddTools(s, tools.AddAnnotationTools, enabledTools, dt.annotations, "annotations")
+	maybeAddTools(s, tools.AddTempoTools, enabledTools, dt.tempo, "tempo")
+	maybeAddTools(s, tools.AddMimirTools, enabledTools, dt.mimir, "mimir")
 }
 
 func newServer(transport string, dt disabledTools) (*server.MCPServer, *mcpgrafana.ToolManager) {
@@ -172,22 +246,25 @@ func newServer(transport string, dt disabledTools) (*server.MCPServer, *mcpgrafa
 	}
 	s := server.NewMCPServer("mcp-grafana", mcpgrafana.Version(),
 		server.WithInstructions(`
-This server provides access to your Grafana instance and the surrounding ecosystem.
+This server provides read-only access to your Grafana instance and the surrounding ecosystem.
 
 Available Capabilities:
-- Dashboards: Search, retrieve, update, and create dashboards. Extract panel queries and datasource information.
+- Dashboards: Search and retrieve dashboards. Extract panel queries and datasource information.
 - Datasources: List and fetch details for datasources.
-- Prometheus & Loki: Run PromQL and LogQL queries, retrieve metric/log metadata, and explore label names/values.
-- Incidents: Search, create, update, and resolve incidents in Grafana Incident.
-- Sift Investigations: Start and manage Sift investigations, analyze logs/traces, find error patterns, and detect slow requests.
+- Prometheus & Mimir: Run PromQL queries, retrieve metric metadata, and explore label names/values.
+- Loki: Run LogQL queries, retrieve log metadata, and explore label names/values.
+- Tempo: Search traces, retrieve trace details, and explore trace tags and metadata.
+- Incidents: Search and view incidents in Grafana Incident.
+- Sift Investigations: View existing Sift investigations and analyses.
 - Alerting: List and fetch alert rules and notification contact points.
-- OnCall: View and manage on-call schedules, shifts, teams, and users.
-- Admin: List teams and perform administrative tasks.
-- Pyroscope: Profile applications and fetch profiling data.
+- OnCall: View on-call schedules, shifts, teams, and users.
+- Admin: List teams and users.
+- Pyroscope: Fetch profiling data and explore profile types.
 - Navigation: Generate deeplink URLs for Grafana resources like dashboards, panels, and Explore queries.
-- Proxied Tools: Access tools from external MCP servers (like Tempo) through dynamic discovery.
+- Proxied Tools: Access tools from external MCP servers through dynamic discovery.
 
-Note that some of these capabilities may be disabled. Do not try to use features that are not available via tools.
+Note: This server operates in read-only mode. Write operations are not available.
+Some capabilities may be disabled. Do not try to use features that are not available via tools.
 `),
 		server.WithHooks(hooks),
 	)
@@ -365,18 +442,26 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 }
 
 func main() {
-	var transport string
-	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio, sse or streamable-http)")
-	flag.StringVar(
-		&transport,
-		"transport",
-		"stdio",
-		"Transport type (stdio, sse or streamable-http)",
-	)
-	addr := flag.String("address", "localhost:8000", "The host and port to start the sse server on")
-	basePath := flag.String("base-path", "", "Base path for the sse server")
-	endpointPath := flag.String("endpoint-path", "/mcp", "Endpoint path for the streamable-http server")
-	logLevel := flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	// Load .env file first (environment variables take precedence over .env)
+	if err := loadEnvFile(".env"); err != nil {
+		slog.Warn("Failed to load .env file", "error", err)
+	}
+
+	// Load config.yaml as fallback (env vars from .env or system take precedence)
+	cfg, err := loadConfig("config.yaml")
+	if err != nil {
+		slog.Error("Failed to load config file", "error", err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		cfg = &Config{} // Use empty config if file doesn't exist
+	}
+
+	// Define flags (can still override config/env)
+	serverPort := flag.String("port", "", "The port to start the server on")
+	basePath := flag.String("base-path", "", "Base path for the server")
+	endpointPath := flag.String("endpoint-path", "", "Endpoint path for the streamable-http server")
+	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	var dt disabledTools
 	dt.addFlags()
@@ -384,8 +469,6 @@ func main() {
 	gc.addFlags()
 	var tls tlsConfig
 	tls.addFlags()
-	var ac authConfig
-	ac.addFlags()
 	flag.Parse()
 
 	if *showVersion {
@@ -393,36 +476,88 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Resolve configuration: CLI flag > env var > config file > default
+	// Transport is always streamable-http
+	resolvedTransport := "streamable-http"
+
+	// Server port
+	resolvedPort := *serverPort
+	if resolvedPort == "" {
+		resolvedPort = getConfigValue("MCP_SERVER_PORT", cfg.ServerPort, "8443")
+	}
+	resolvedAddr := "0.0.0.0:" + resolvedPort
+
+	// Base path
+	resolvedBasePath := *basePath
+	if resolvedBasePath == "" {
+		resolvedBasePath = getConfigValue("MCP_BASE_PATH", cfg.BasePath, "")
+	}
+
+	// Endpoint path
+	resolvedEndpointPath := *endpointPath
+	if resolvedEndpointPath == "" {
+		resolvedEndpointPath = getConfigValue("MCP_ENDPOINT_PATH", cfg.EndpointPath, "/mcp")
+	}
+
+	// Log level
+	resolvedLogLevel := *logLevel
+	if resolvedLogLevel == "" {
+		resolvedLogLevel = getConfigValue("MCP_LOG_LEVEL", cfg.LogLevel, "info")
+	}
+
+	// Get auth token from env var or config file (required for HTTP transports)
+	authToken := getConfigValue(mcpgrafana.AuthTokenEnvVar, cfg.MCPAuthToken, "")
+
 	// Convert local grafanaConfig to mcpgrafana.GrafanaConfig
-	grafanaConfig := mcpgrafana.GrafanaConfig{Debug: gc.debug}
-	if gc.tlsCertFile != "" || gc.tlsKeyFile != "" || gc.tlsCAFile != "" || gc.tlsSkipVerify {
-		grafanaConfig.TLSConfig = &mcpgrafana.TLSConfig{
-			CertFile:   gc.tlsCertFile,
-			KeyFile:    gc.tlsKeyFile,
-			CAFile:     gc.tlsCAFile,
-			SkipVerify: gc.tlsSkipVerify,
+	grafanaCfg := mcpgrafana.GrafanaConfig{Debug: gc.debug || cfg.Debug}
+
+	// TLS config from flags or config file
+	tlsCertFile := gc.tlsCertFile
+	if tlsCertFile == "" {
+		tlsCertFile = cfg.TLSCertFile
+	}
+	tlsKeyFile := gc.tlsKeyFile
+	if tlsKeyFile == "" {
+		tlsKeyFile = cfg.TLSKeyFile
+	}
+	tlsCAFile := gc.tlsCAFile
+	if tlsCAFile == "" {
+		tlsCAFile = cfg.TLSCAFile
+	}
+	tlsSkipVerify := gc.tlsSkipVerify || cfg.TLSSkipVerify
+
+	if tlsCertFile != "" || tlsKeyFile != "" || tlsCAFile != "" || tlsSkipVerify {
+		grafanaCfg.TLSConfig = &mcpgrafana.TLSConfig{
+			CertFile:   tlsCertFile,
+			KeyFile:    tlsKeyFile,
+			CAFile:     tlsCAFile,
+			SkipVerify: tlsSkipVerify,
 		}
 	}
 
-	// Resolve authentication token (env var takes precedence, "auto" generates a token)
-	authToken, err := ac.resolveToken()
-	if err != nil {
-		panic(fmt.Errorf("failed to resolve auth token: %w", err))
+	// Server TLS config
+	serverTLSCertFile := tls.certFile
+	if serverTLSCertFile == "" {
+		serverTLSCertFile = cfg.ServerTLSCertFile
 	}
+	serverTLSKeyFile := tls.keyFile
+	if serverTLSKeyFile == "" {
+		serverTLSKeyFile = cfg.ServerTLSKeyFile
+	}
+	serverTLS := tlsConfig{certFile: serverTLSCertFile, keyFile: serverTLSKeyFile}
 
 	// Build auth config with public paths that don't require authentication
 	authCfg := mcpgrafana.AuthConfig{
 		Token:       authToken,
-		ShowToken:   ac.showToken,
 		PublicPaths: []string{"/healthz"},
 	}
 
-	// Print token info if auth is enabled (only for HTTP transports)
-	if transport != "stdio" {
-		mcpgrafana.PrintTokenInfo(authToken, ac.showToken)
+	// Log auth status (only for HTTP transports)
+	if resolvedTransport != "stdio" {
+		mcpgrafana.LogAuthStatus(authToken)
 	}
 
-	if err := run(transport, *addr, *basePath, *endpointPath, parseLevel(*logLevel), dt, grafanaConfig, tls, authCfg); err != nil {
+	if err := run(resolvedTransport, resolvedAddr, resolvedBasePath, resolvedEndpointPath, parseLevel(resolvedLogLevel), dt, grafanaCfg, serverTLS, authCfg); err != nil {
 		panic(err)
 	}
 }
