@@ -298,6 +298,89 @@ All read operations remain available, allowing you to query dashboards, run Prom
 - `--server.tls-cert-file`: Path to TLS certificate file for server HTTPS
 - `--server.tls-key-file`: Path to TLS private key file for server HTTPS
 
+**Authentication Configuration (SSE and streamable-http transports only):**
+- `--auth-token`: Bearer token for authenticating incoming MCP requests. Use `auto` to generate a secure token.
+- `--show-token`: Print the authentication token on startup for easy copying
+
+### Bearer Token Authentication
+
+When deploying the MCP server in an environment where the HTTP endpoint is exposed to the internet (e.g., in a customer VPC), you can enable Bearer token authentication to secure access.
+
+**Configuration:**
+
+1. **Set the token via environment variable (recommended):**
+
+   ```bash
+   export MCP_AUTH_TOKEN="your-secure-token-here"
+   # Or use "auto" to generate a secure token automatically
+   export MCP_AUTH_TOKEN="auto"
+   ```
+
+2. **Or use the CLI flag:**
+
+   ```bash
+   ./mcp-grafana -t streamable-http --auth-token=auto --show-token
+   ```
+
+**Token Generation:**
+
+When you set `MCP_AUTH_TOKEN=auto` or use `--auth-token=auto`, the server generates a cryptographically secure 256-bit random token using `crypto/rand`.
+
+**Viewing the Token:**
+
+Use the `--show-token` flag to display the token on startup. This makes it easy to copy and provide to MCP clients:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e GRAFANA_URL=http://localhost:3000 \
+  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your_token> \
+  -e MCP_AUTH_TOKEN=auto \
+  mcp/grafana -t streamable-http --show-token
+```
+
+The token will be displayed in a formatted box on startup:
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        MCP SERVER AUTHENTICATION TOKEN                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Token: a1b2c3d4e5f6...                                                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Copy this token and provide it to your MCP client.                          ║
+║ Include it in the Authorization header as: Bearer <token>                   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Client Usage:**
+
+MCP clients must include the token in the `Authorization` header:
+
+```
+Authorization: Bearer <your-token>
+```
+
+**Security Best Practices:**
+
+1. **Always use HTTPS in production** - Configure server TLS with `--server.tls-cert-file` and `--server.tls-key-file`
+2. **Use environment variables** - Avoid passing tokens via CLI flags in production (they may appear in process lists)
+3. **Generate secure tokens** - Use `auto` for automatic secure token generation (256-bit entropy)
+4. **Health check endpoint** - The `/healthz` endpoint is always public (no authentication required) for load balancer health checks
+
+**Example: Secure VPC Deployment with Docker**
+
+```bash
+docker run --rm -p 8443:8443 \
+  -v /path/to/certs:/certs:ro \
+  -e GRAFANA_URL=http://your-grafana:3000 \
+  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<grafana_token> \
+  -e MCP_AUTH_TOKEN=<your_mcp_auth_token> \
+  mcp/grafana \
+  -t streamable-http \
+  --address 0.0.0.0:8443 \
+  --server.tls-cert-file /certs/server.crt \
+  --server.tls-key-file /certs/server.key
+```
+
 ## Usage
 
 This MCP server works with both local Grafana instances and Grafana Cloud. For Grafana Cloud, use your instance URL (e.g., `https://myinstance.grafana.net`) instead of `http://localhost:3000` in the configuration examples below.

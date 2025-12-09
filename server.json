@@ -49,6 +49,13 @@
           "format": "string",
           "isSecret": false,
           "name": "GRAFANA_ORG_ID"
+        },
+        {
+          "description": "Bearer token for authenticating incoming MCP requests. Use 'auto' to generate a secure token. Only applies to SSE and streamable-http transports.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "MCP_AUTH_TOKEN"
         }
       ]
     }

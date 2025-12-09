@@ -56,6 +56,31 @@ type grafanaConfig struct {
 	tlsSkipVerify bool
 }
 
+// authConfig holds configuration for Bearer token authentication.
+type authConfig struct {
+	// token is the Bearer token for authenticating incoming requests.
+	// If empty, authentication is disabled.
+	// If "auto", a secure token is generated automatically.
+	token string
+
+	// showToken controls whether to print the token on startup.
+	showToken bool
+}
+
+func (ac *authConfig) addFlags() {
+	flag.StringVar(&ac.token, "auth-token", "", "Bearer token for authenticating incoming MCP requests. Use 'auto' to generate a secure token. Can also be set via MCP_AUTH_TOKEN env var.")
+	flag.BoolVar(&ac.showToken, "show-token", false, "Print the authentication token on startup for easy copying")
+}
+
+// resolveToken resolves the final token value, checking env var first, then flag.
+func (ac *authConfig) resolveToken() (string, error) {
+	// Environment variable takes precedence
+	if envToken := os.Getenv(mcpgrafana.AuthTokenEnvVar); envToken != "" {
+		return mcpgrafana.ResolveAuthToken(envToken)
+	}
+	return mcpgrafana.ResolveAuthToken(ac.token)
+}
+
 func (dt *disabledTools) addFlags() {
 	flag.StringVar(&dt.enabledTools, "enabled-tools", "search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,admin,pyroscope,navigation,proxied,annotations", "A comma separated list of tools enabled for this server. Can be overwritten entirely or by disabling specific components, e.g. --disable-search.")
 	flag.BoolVar(&dt.search, "disable-search", false, "Disable search tools")
@@ -236,7 +261,7 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig) error {
+func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig, auth mcpgrafana.AuthConfig) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 	s, tm := newServer(transport, dt)
 
@@ -297,9 +322,16 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 		}
 		mux.Handle(basePath, srv)
 		mux.HandleFunc("/healthz", handleHealthz)
-		httpSrv.Handler = mux
+
+		// Apply Bearer token authentication middleware if configured
+		if auth.Token != "" {
+			httpSrv.Handler = mcpgrafana.NewBearerAuthMiddleware(auth)(mux)
+		} else {
+			httpSrv.Handler = mux
+		}
+
 		slog.Info("Starting Grafana MCP server using SSE transport",
-			"version", mcpgrafana.Version(), "address", addr, "basePath", basePath)
+			"version", mcpgrafana.Version(), "address", addr, "basePath", basePath, "auth_enabled", auth.Token != "")
 		return runHTTPServer(ctx, srv, addr, "SSE")
 	case "streamable-http":
 		httpSrv := &http.Server{Addr: addr}
@@ -316,9 +348,16 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 		mux := http.NewServeMux()
 		mux.Handle(endpointPath, srv)
 		mux.HandleFunc("/healthz", handleHealthz)
-		httpSrv.Handler = mux
+
+		// Apply Bearer token authentication middleware if configured
+		if auth.Token != "" {
+			httpSrv.Handler = mcpgrafana.NewBearerAuthMiddleware(auth)(mux)
+		} else {
+			httpSrv.Handler = mux
+		}
+
 		slog.Info("Starting Grafana MCP server using StreamableHTTP transport",
-			"version", mcpgrafana.Version(), "address", addr, "endpointPath", endpointPath)
+			"version", mcpgrafana.Version(), "address", addr, "endpointPath", endpointPath, "auth_enabled", auth.Token != "")
 		return runHTTPServer(ctx, srv, addr, "StreamableHTTP")
 	default:
 		return fmt.Errorf("invalid transport type: %s. Must be 'stdio', 'sse' or 'streamable-http'", transport)
@@ -345,6 +384,8 @@ func main() {
 	gc.addFlags()
 	var tls tlsConfig
 	tls.addFlags()
+	var ac authConfig
+	ac.addFlags()
 	flag.Parse()
 
 	if *showVersion {
@@ -363,7 +404,25 @@ func main() {
 		}
 	}
 
-	if err := run(transport, *addr, *basePath, *endpointPath, parseLevel(*logLevel), dt, grafanaConfig, tls); err != nil {
+	// Resolve authentication token (env var takes precedence, "auto" generates a token)
+	authToken, err := ac.resolveToken()
+	if err != nil {
+		panic(fmt.Errorf("failed to resolve auth token: %w", err))
+	}
+
+	// Build auth config with public paths that don't require authentication
+	authCfg := mcpgrafana.AuthConfig{
+		Token:       authToken,
+		ShowToken:   ac.showToken,
+		PublicPaths: []string{"/healthz"},
+	}
+
+	// Print token info if auth is enabled (only for HTTP transports)
+	if transport != "stdio" {
+		mcpgrafana.PrintTokenInfo(authToken, ac.showToken)
+	}
+
+	if err := run(transport, *addr, *basePath, *endpointPath, parseLevel(*logLevel), dt, grafanaConfig, tls, authCfg); err != nil {
 		panic(err)
 	}
 }
