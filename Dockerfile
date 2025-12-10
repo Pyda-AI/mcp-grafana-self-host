@@ -24,21 +24,15 @@ LABEL io.modelcontextprotocol.server.name="io.github.grafana/mcp-grafana"
 # Install ca-certificates for HTTPS requests
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user
-RUN useradd -r -u 1000 -m mcp-grafana
-
 # Set the working directory
 WORKDIR /app
 
 # Copy the binary from the builder stage
-COPY --from=builder --chown=1000:1000 /app/mcp-grafana /app/
-
-# Use the non-root user
-USER mcp-grafana
+COPY --from=builder /app/mcp-grafana /app/
 
 # Default port (can be overridden via MCP_SERVER_PORT env var)
 EXPOSE 8443
 
 # Run the application - it reads config from env vars automatically
-# No arguments needed: uses streamable-http transport, reads port from MCP_SERVER_PORT (default 8443)
+# Always uses streamable-http transport on /mcp endpoint, reads port from MCP_SERVER_PORT (default 8443)
 ENTRYPOINT ["/app/mcp-grafana"]

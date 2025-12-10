@@ -11,14 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"gopkg.in/yaml.v3"
-
 	mcpgrafana "github.com/grafana/mcp-grafana"
 	"github.com/grafana/mcp-grafana/tools"
 )
@@ -70,53 +69,6 @@ func loadEnvFile(path string) error {
 	return scanner.Err()
 }
 
-// Config represents the YAML configuration file structure
-type Config struct {
-	GrafanaURL                  string `yaml:"grafana_url"`
-	GrafanaServiceAccountToken  string `yaml:"grafana_service_account_token"`
-	MCPAuthToken                string `yaml:"mcp_auth_token"`
-	ServerPort                  string `yaml:"server_port"`
-	BasePath                    string `yaml:"base_path"`
-	EndpointPath                string `yaml:"endpoint_path"`
-	LogLevel                    string `yaml:"log_level"`
-	Debug                       bool   `yaml:"debug"`
-	TLSCertFile                 string `yaml:"tls_cert_file"`
-	TLSKeyFile                  string `yaml:"tls_key_file"`
-	TLSCAFile                   string `yaml:"tls_ca_file"`
-	TLSSkipVerify               bool   `yaml:"tls_skip_verify"`
-	ServerTLSCertFile           string `yaml:"server_tls_cert_file"`
-	ServerTLSKeyFile            string `yaml:"server_tls_key_file"`
-}
-
-// loadConfig loads configuration from config.yaml if it exists
-func loadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // Config file doesn't exist, use defaults
-		}
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	return &config, nil
-}
-
-// getConfigValue returns value from: 1) env var, 2) config file, 3) default
-func getConfigValue(envVar string, configValue string, defaultValue string) string {
-	if v := os.Getenv(envVar); v != "" {
-		return v
-	}
-	if configValue != "" {
-		return configValue
-	}
-	return defaultValue
-}
-
 func maybeAddTools(s *server.MCPServer, tf func(*server.MCPServer), enabledTools []string, disable bool, category string) {
 	if !slices.Contains(enabledTools, category) {
 		slog.Debug("Not enabling tools", "category", category)
@@ -144,6 +96,9 @@ type disabledTools struct {
 type grafanaConfig struct {
 	// Whether to enable debug mode for the Grafana transport.
 	debug bool
+
+	// Organization ID for multi-org support
+	orgID string
 
 	// TLS configuration
 	tlsCertFile   string
@@ -177,6 +132,7 @@ func (dt *disabledTools) addFlags() {
 
 func (gc *grafanaConfig) addFlags() {
 	flag.BoolVar(&gc.debug, "debug", false, "Enable debug mode for the Grafana transport")
+	flag.StringVar(&gc.orgID, "org-id", "", "Grafana organization ID for multi-org support")
 
 	// TLS configuration flags
 	flag.StringVar(&gc.tlsCertFile, "tls-cert-file", "", "Path to TLS certificate file for client authentication")
@@ -206,7 +162,7 @@ func (dt *disabledTools) addTools(s *server.MCPServer) {
 	maybeAddTools(s, tools.AddMimirTools, enabledTools, dt.mimir, "mimir")
 }
 
-func newServer(transport string, dt disabledTools) (*server.MCPServer, *mcpgrafana.ToolManager) {
+func newServer(dt disabledTools) (*server.MCPServer, *mcpgrafana.ToolManager) {
 	sm := mcpgrafana.NewSessionManager()
 
 	// Declare variable for ToolManager that will be initialized after server creation
@@ -218,10 +174,8 @@ func newServer(transport string, dt disabledTools) (*server.MCPServer, *mcpgrafa
 		OnUnregisterSession: []server.OnUnregisterSessionHookFunc{sm.RemoveSession},
 	}
 
-	// Add proxied tools hooks if enabled and we're not running in stdio mode.
-	// (stdio mode is handled by InitializeAndRegisterServerTools; per-session tools
-	// are not supported).
-	if transport != "stdio" && !dt.proxied {
+	// Add proxied tools hooks if enabled (always using streamable-http)
+	if !dt.proxied {
 		// OnBeforeListTools: Discover, connect, and register tools
 		hooks.OnBeforeListTools = []server.OnBeforeListToolsFunc{
 			func(ctx context.Context, id any, request *mcp.ListToolsRequest) {
@@ -338,9 +292,9 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig, auth mcpgrafana.AuthConfig) error {
+func run(addr string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig, auth mcpgrafana.AuthConfig) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-	s, tm := newServer(transport, dt)
+	s, _ := newServer(dt)
 
 	// Create a context that will be cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -356,89 +310,35 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 		<-sigChan
 		slog.Info("Received shutdown signal")
 		cancel()
-
-		// For stdio, close stdin to unblock the Listen call
-		if transport == "stdio" {
-			_ = os.Stdin.Close()
-		}
 	}()
 
-	// Start the appropriate server based on transport
-	switch transport {
-	case "stdio":
-		srv := server.NewStdioServer(s)
-		cf := mcpgrafana.ComposedStdioContextFunc(gc)
-		srv.SetContextFunc(cf)
-
-		// For stdio (single-tenant), initialize proxied tools on the server directly
-		if !dt.proxied {
-			stdioCtx := cf(ctx)
-			if err := tm.InitializeAndRegisterServerTools(stdioCtx); err != nil {
-				slog.Error("failed to initialize proxied tools for stdio", "error", err)
-			}
-		}
-
-		slog.Info("Starting Grafana MCP server using stdio transport", "version", mcpgrafana.Version())
-
-		err := srv.Listen(ctx, os.Stdin, os.Stdout)
-		if err != nil && err != context.Canceled {
-			return fmt.Errorf("server error: %v", err)
-		}
-		return nil
-
-	case "sse":
-		httpSrv := &http.Server{Addr: addr}
-		srv := server.NewSSEServer(s,
-			server.WithSSEContextFunc(mcpgrafana.ComposedSSEContextFunc(gc)),
-			server.WithStaticBasePath(basePath),
-			server.WithHTTPServer(httpSrv),
-		)
-		mux := http.NewServeMux()
-		if basePath == "" {
-			basePath = "/"
-		}
-		mux.Handle(basePath, srv)
-		mux.HandleFunc("/healthz", handleHealthz)
-
-		// Apply Bearer token authentication middleware if configured
-		if auth.Token != "" {
-			httpSrv.Handler = mcpgrafana.NewBearerAuthMiddleware(auth)(mux)
-		} else {
-			httpSrv.Handler = mux
-		}
-
-		slog.Info("Starting Grafana MCP server using SSE transport",
-			"version", mcpgrafana.Version(), "address", addr, "basePath", basePath, "auth_enabled", auth.Token != "")
-		return runHTTPServer(ctx, srv, addr, "SSE")
-	case "streamable-http":
-		httpSrv := &http.Server{Addr: addr}
-		opts := []server.StreamableHTTPOption{
-			server.WithHTTPContextFunc(mcpgrafana.ComposedHTTPContextFunc(gc)),
-			server.WithStateLess(dt.proxied), // Stateful when proxied tools enabled (requires sessions)
-			server.WithEndpointPath(endpointPath),
-			server.WithStreamableHTTPServer(httpSrv),
-		}
-		if tls.certFile != "" || tls.keyFile != "" {
-			opts = append(opts, server.WithTLSCert(tls.certFile, tls.keyFile))
-		}
-		srv := server.NewStreamableHTTPServer(s, opts...)
-		mux := http.NewServeMux()
-		mux.Handle(endpointPath, srv)
-		mux.HandleFunc("/healthz", handleHealthz)
-
-		// Apply Bearer token authentication middleware if configured
-		if auth.Token != "" {
-			httpSrv.Handler = mcpgrafana.NewBearerAuthMiddleware(auth)(mux)
-		} else {
-			httpSrv.Handler = mux
-		}
-
-		slog.Info("Starting Grafana MCP server using StreamableHTTP transport",
-			"version", mcpgrafana.Version(), "address", addr, "endpointPath", endpointPath, "auth_enabled", auth.Token != "")
-		return runHTTPServer(ctx, srv, addr, "StreamableHTTP")
-	default:
-		return fmt.Errorf("invalid transport type: %s. Must be 'stdio', 'sse' or 'streamable-http'", transport)
+	// Start streamable-http server with hardcoded /mcp endpoint
+	endpointPath := "/mcp"
+	httpSrv := &http.Server{Addr: addr}
+	opts := []server.StreamableHTTPOption{
+		server.WithHTTPContextFunc(mcpgrafana.ComposedHTTPContextFunc(gc)),
+		server.WithStateLess(dt.proxied), // Stateful when proxied tools enabled (requires sessions)
+		server.WithEndpointPath(endpointPath),
+		server.WithStreamableHTTPServer(httpSrv),
 	}
+	if tls.certFile != "" || tls.keyFile != "" {
+		opts = append(opts, server.WithTLSCert(tls.certFile, tls.keyFile))
+	}
+	srv := server.NewStreamableHTTPServer(s, opts...)
+	mux := http.NewServeMux()
+	mux.Handle(endpointPath, srv)
+	mux.HandleFunc("/healthz", handleHealthz)
+
+	// Apply Bearer token authentication middleware if configured
+	if auth.Token != "" {
+		httpSrv.Handler = mcpgrafana.NewBearerAuthMiddleware(auth)(mux)
+	} else {
+		httpSrv.Handler = mux
+	}
+
+	slog.Info("Starting Grafana MCP server using StreamableHTTP transport",
+		"version", mcpgrafana.Version(), "address", addr, "endpointPath", endpointPath, "auth_enabled", auth.Token != "")
+	return runHTTPServer(ctx, srv, addr, "StreamableHTTP")
 }
 
 func main() {
@@ -447,20 +347,8 @@ func main() {
 		slog.Warn("Failed to load .env file", "error", err)
 	}
 
-	// Load config.yaml as fallback (env vars from .env or system take precedence)
-	cfg, err := loadConfig("config.yaml")
-	if err != nil {
-		slog.Error("Failed to load config file", "error", err)
-		os.Exit(1)
-	}
-	if cfg == nil {
-		cfg = &Config{} // Use empty config if file doesn't exist
-	}
-
-	// Define flags (can still override config/env)
+	// Define flags (can override env vars)
 	serverPort := flag.String("port", "", "The port to start the server on")
-	basePath := flag.String("base-path", "", "Base path for the server")
-	endpointPath := flag.String("endpoint-path", "", "Endpoint path for the streamable-http server")
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	var dt disabledTools
@@ -476,55 +364,71 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Resolve configuration: CLI flag > env var > config file > default
-	// Transport is always streamable-http
-	resolvedTransport := "streamable-http"
+	// Helper function to get env var with default
+	getEnv := func(key, defaultValue string) string {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+		return defaultValue
+	}
 
+	// Helper function to get bool env var
+	getEnvBool := func(key string) bool {
+		v := os.Getenv(key)
+		return v == "true" || v == "1" || v == "yes"
+	}
+
+	// Resolve configuration: CLI flag > env var > default
 	// Server port
 	resolvedPort := *serverPort
 	if resolvedPort == "" {
-		resolvedPort = getConfigValue("MCP_SERVER_PORT", cfg.ServerPort, "8443")
+		resolvedPort = getEnv("MCP_SERVER_PORT", "8443")
 	}
 	resolvedAddr := "0.0.0.0:" + resolvedPort
-
-	// Base path
-	resolvedBasePath := *basePath
-	if resolvedBasePath == "" {
-		resolvedBasePath = getConfigValue("MCP_BASE_PATH", cfg.BasePath, "")
-	}
-
-	// Endpoint path
-	resolvedEndpointPath := *endpointPath
-	if resolvedEndpointPath == "" {
-		resolvedEndpointPath = getConfigValue("MCP_ENDPOINT_PATH", cfg.EndpointPath, "/mcp")
-	}
 
 	// Log level
 	resolvedLogLevel := *logLevel
 	if resolvedLogLevel == "" {
-		resolvedLogLevel = getConfigValue("MCP_LOG_LEVEL", cfg.LogLevel, "info")
+		resolvedLogLevel = getEnv("MCP_LOG_LEVEL", "info")
 	}
 
-	// Get auth token from env var or config file (required for HTTP transports)
-	authToken := getConfigValue(mcpgrafana.AuthTokenEnvVar, cfg.MCPAuthToken, "")
+	// Get auth token from env var (required for HTTP transports)
+	authToken := os.Getenv(mcpgrafana.AuthTokenEnvVar)
 
-	// Convert local grafanaConfig to mcpgrafana.GrafanaConfig
-	grafanaCfg := mcpgrafana.GrafanaConfig{Debug: gc.debug || cfg.Debug}
+	// Build GrafanaConfig
+	grafanaCfg := mcpgrafana.GrafanaConfig{Debug: gc.debug}
 
-	// TLS config from flags or config file
+	// Organization ID from flag or env var
+	orgIDStr := gc.orgID
+	if orgIDStr == "" {
+		orgIDStr = os.Getenv("GRAFANA_ORG_ID")
+	}
+	if orgIDStr != "" {
+		orgID, err := strconv.ParseInt(orgIDStr, 10, 64)
+		if err != nil {
+			slog.Warn("Invalid organization ID, ignoring", "value", orgIDStr, "error", err)
+		} else {
+			grafanaCfg.OrgID = orgID
+		}
+	}
+
+	// TLS config from flags or env vars
 	tlsCertFile := gc.tlsCertFile
 	if tlsCertFile == "" {
-		tlsCertFile = cfg.TLSCertFile
+		tlsCertFile = getEnv("MCP_TLS_CERT_FILE", "")
 	}
 	tlsKeyFile := gc.tlsKeyFile
 	if tlsKeyFile == "" {
-		tlsKeyFile = cfg.TLSKeyFile
+		tlsKeyFile = getEnv("MCP_TLS_KEY_FILE", "")
 	}
 	tlsCAFile := gc.tlsCAFile
 	if tlsCAFile == "" {
-		tlsCAFile = cfg.TLSCAFile
+		tlsCAFile = getEnv("MCP_TLS_CA_FILE", "")
 	}
-	tlsSkipVerify := gc.tlsSkipVerify || cfg.TLSSkipVerify
+	tlsSkipVerify := gc.tlsSkipVerify
+	if !tlsSkipVerify {
+		tlsSkipVerify = getEnvBool("MCP_TLS_SKIP_VERIFY")
+	}
 
 	if tlsCertFile != "" || tlsKeyFile != "" || tlsCAFile != "" || tlsSkipVerify {
 		grafanaCfg.TLSConfig = &mcpgrafana.TLSConfig{
@@ -535,14 +439,14 @@ func main() {
 		}
 	}
 
-	// Server TLS config
+	// Server TLS config from flags or env vars
 	serverTLSCertFile := tls.certFile
 	if serverTLSCertFile == "" {
-		serverTLSCertFile = cfg.ServerTLSCertFile
+		serverTLSCertFile = getEnv("MCP_SERVER_TLS_CERT_FILE", "")
 	}
 	serverTLSKeyFile := tls.keyFile
 	if serverTLSKeyFile == "" {
-		serverTLSKeyFile = cfg.ServerTLSKeyFile
+		serverTLSKeyFile = getEnv("MCP_SERVER_TLS_KEY_FILE", "")
 	}
 	serverTLS := tlsConfig{certFile: serverTLSCertFile, keyFile: serverTLSKeyFile}
 
@@ -552,12 +456,10 @@ func main() {
 		PublicPaths: []string{"/healthz"},
 	}
 
-	// Log auth status (only for HTTP transports)
-	if resolvedTransport != "stdio" {
-		mcpgrafana.LogAuthStatus(authToken)
-	}
+	// Log auth status
+	mcpgrafana.LogAuthStatus(authToken)
 
-	if err := run(resolvedTransport, resolvedAddr, resolvedBasePath, resolvedEndpointPath, parseLevel(resolvedLogLevel), dt, grafanaCfg, serverTLS, authCfg); err != nil {
+	if err := run(resolvedAddr, parseLevel(resolvedLogLevel), dt, grafanaCfg, serverTLS, authCfg); err != nil {
 		panic(err)
 	}
 }
