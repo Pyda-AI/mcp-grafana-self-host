@@ -4,53 +4,63 @@ A self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) s
 
 This is a simplified fork of [grafana/mcp-grafana](https://github.com/grafana/mcp-grafana) that:
 - Uses **only streamable-http transport** on the `/mcp` endpoint
-- Configures via **.env file** (no config.yaml)
+- Configures via **.env file**
 - Defaults to **port 8443**
 - Supports **TLS via environment variables**
-- Includes **CLI flag for organization ID**
+
+## Available Tools
+
+| Category | Tool | Description |
+|----------|------|-------------|
+| **Search** | `search_dashboards` | Search for dashboards by query string |
+| | `search_folders` | Search for folders by query string |
+| **Datasource** | `list_datasources` | List available datasources, optionally filter by type |
+| | `get_datasource_by_uid` | Get datasource details by UID |
+| | `get_datasource_by_name` | Get datasource details by name |
+| **Dashboard** | `get_dashboard_by_uid` | Get full dashboard JSON by UID |
+| | `get_dashboard_summary` | Get compact dashboard overview (recommended) |
+| | `get_dashboard_property` | Extract specific data via JSONPath |
+| | `get_dashboard_panel_queries` | Get all panel queries from a dashboard |
+| **Prometheus** | `query_prometheus` | Execute PromQL queries (instant or range) |
+| | `list_prometheus_metric_names` | List metric names with regex filtering |
+| | `list_prometheus_metric_metadata` | Get metric metadata |
+| | `list_prometheus_label_names` | List label names |
+| | `list_prometheus_label_values` | Get values for a specific label |
+| **Loki** | `query_loki_logs` | Execute LogQL queries |
+| | `query_loki_stats` | Get stream statistics for a selector |
+| | `list_loki_label_names` | List available label names |
+| | `list_loki_label_values` | Get values for a specific label |
+| **Tempo** | `search_tempo_traces` | Search traces by service, span, tags, duration |
+| | `get_tempo_trace` | Get full trace by trace ID |
+| | `query_tempo_traceql` | Execute TraceQL queries |
+| | `list_tempo_tag_names` | List available tag names |
+| | `list_tempo_tag_values` | Get values for a specific tag |
+| **Alerting** | `list_alert_rules` | List alert rules with state and labels |
+| | `get_alert_rule_by_uid` | Get full alert rule configuration |
+| | `list_contact_points` | List notification contact points |
+| **Incident** | `list_incidents` | List incidents (active, resolved, drill) |
+| | `get_incident` | Get incident details by ID |
+| **OnCall** | `list_oncall_schedules` | List OnCall schedules |
+| | `get_oncall_shift` | Get shift details |
+| | `get_current_oncall_users` | Get users currently on-call |
+| | `list_oncall_teams` | List OnCall teams |
+| | `list_oncall_users` | List OnCall users |
+| | `list_alert_groups` | List IRM alert groups |
+| | `get_alert_group` | Get alert group details |
+| **Sift** | `list_sift_investigations` | List Sift investigations |
+| | `get_sift_investigation` | Get investigation by UUID |
+| | `get_sift_analysis` | Get specific analysis from investigation |
+| **Admin** | `list_teams` | Search for teams |
+| | `list_users_by_org` | List users in current organization |
+| **Navigation** | `generate_deeplink` | Generate URLs for dashboards, panels, explore |
+| **Annotations** | `get_annotations` | Fetch annotations with filters |
+| | `get_annotation_tags` | Get annotation tags |
 
 ## Requirements
 
 - **Grafana version 9.0 or later** for full functionality
 - Docker (recommended) or Go 1.24+
 - Grafana service account token with appropriate permissions
-
-## Quick Start
-
-### 1. Setup
-
-   ```bash
-# Generate .env file with MCP auth token
-./scripts/setup.sh
-
-# Edit .env with your Grafana credentials
-nano .env
-```
-
-### 2. Configure
-
-Update `.env` with your Grafana instance details:
-
-   ```bash
-GRAFANA_URL=http://localhost:3000
-GRAFANA_SERVICE_ACCOUNT_TOKEN=your-token-here
-MCP_AUTH_TOKEN=generated-by-setup-script
-   ```
-
-### 3. Run
-
-   ```bash
-# Option A: Docker (recommended)
-./run.sh
-
-# Option B: Go directly
-./scripts/run.sh
-
-# Option C: Docker with options
-./scripts/docker-run.sh --build --detach
-```
-
-The server will be available at `http://localhost:8443/mcp`
 
 ## Configuration
 
@@ -68,7 +78,6 @@ The server will be available at `http://localhost:8443/mcp`
 |----------|---------|-------------|
 | `MCP_SERVER_PORT` | `8443` | Port for the MCP server |
 | `MCP_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
-| `GRAFANA_ORG_ID` | - | Grafana organization ID for multi-org support |
 
 ### TLS Client Configuration (for connecting to Grafana)
 
@@ -77,7 +86,6 @@ The server will be available at `http://localhost:8443/mcp`
 | `MCP_TLS_CERT_FILE` | Path to TLS certificate file for client authentication |
 | `MCP_TLS_KEY_FILE` | Path to TLS private key file for client authentication |
 | `MCP_TLS_CA_FILE` | Path to TLS CA certificate file for server verification |
-| `MCP_TLS_SKIP_VERIFY` | Skip TLS certificate verification (insecure, testing only) |
 
 ### TLS Server Configuration (for HTTPS server)
 
@@ -85,91 +93,6 @@ The server will be available at `http://localhost:8443/mcp`
 |----------|-------------|
 | `MCP_SERVER_TLS_CERT_FILE` | Path to TLS certificate file for HTTPS server |
 | `MCP_SERVER_TLS_KEY_FILE` | Path to TLS private key file for HTTPS server |
-
-## CLI Flags
-
-All configuration can be overridden with CLI flags:
-
-| Flag | Description |
-|------|-------------|
-| `--port` | Server port |
-| `--log-level` | Log level (debug, info, warn, error) |
-| `--org-id` | Grafana organization ID |
-| `--debug` | Enable debug mode for Grafana transport |
-| `--tls-cert-file` | TLS client certificate |
-| `--tls-key-file` | TLS client private key |
-| `--tls-ca-file` | TLS CA certificate |
-| `--tls-skip-verify` | Skip TLS verification |
-| `--server.tls-cert-file` | Server TLS certificate |
-| `--server.tls-key-file` | Server TLS private key |
-| `--disable-<category>` | Disable specific tool categories |
-
-**Configuration priority:** CLI flags > Environment variables > Defaults
-
-## Examples
-
-### Basic Usage
-
-```bash
-# .env file
-GRAFANA_URL=http://localhost:3000
-GRAFANA_SERVICE_ACCOUNT_TOKEN=glsa_...
-MCP_AUTH_TOKEN=abc123...
-```
-
-```bash
-./run.sh
-# Server: http://localhost:8443/mcp
-```
-
-### Multi-Organization Support
-
-```bash
-# .env file
-GRAFANA_ORG_ID=2
-```
-
-Or via CLI:
-
-```bash
-./mcp-grafana --org-id 2
-```
-
-### TLS Client (connecting to Grafana with mTLS)
-
-```bash
-# .env file
-MCP_TLS_CERT_FILE=/path/to/client.crt
-MCP_TLS_KEY_FILE=/path/to/client.key
-MCP_TLS_CA_FILE=/path/to/ca.crt
-```
-
-The `run.sh` script automatically mounts these certificates into Docker.
-
-### HTTPS Server
-
-```bash
-# .env file
-MCP_SERVER_TLS_CERT_FILE=/path/to/server.crt
-MCP_SERVER_TLS_KEY_FILE=/path/to/server.key
-```
-
-```bash
-./run.sh
-# Server: https://localhost:8443/mcp
-```
-
-### Docker with Custom Port
-
-```bash
-# .env file
-MCP_SERVER_PORT=9000
-```
-
-```bash
-./run.sh
-# Server: http://localhost:9000/mcp
-```
 
 ## Authentication
 
@@ -188,59 +111,32 @@ curl http://localhost:8443/healthz
 # Response: ok (200 OK)
 ```
 
-## Tool Categories
-
-Disable specific tool categories to reduce context window usage:
-
-```bash
-./mcp-grafana --disable-oncall --disable-sift
-```
-
-Available categories:
-- `search`, `datasource`, `dashboard`, `folder`
-- `prometheus`, `loki`, `tempo`, `mimir`, `pyroscope`
-- `incident`, `sift`, `alerting`, `oncall`
-- `admin`, `asserts`, `navigation`, `annotations`, `proxied`
-
 ## Development
 
-### Building
+### Start the Server
 
 ```bash
-go build -o mcp-grafana ./cmd/mcp-grafana
+docker-compose up -d --build grafana-mcp-server
 ```
 
-### Running Locally
+### Stop the Server
 
 ```bash
-# Auto-loads .env
-./mcp-grafana
+docker-compose down
 ```
 
-### Docker Build
+### Restart the Server
 
 ```bash
-docker build -t mcp-grafana-self-host .
-docker run --rm -p 8443:8443 --env-file .env mcp-grafana-self-host
+docker-compose restart grafana-mcp-server
 ```
 
-## Differences from Upstream
+### View Logs
 
-This self-hosted version differs from [grafana/mcp-grafana](https://github.com/grafana/mcp-grafana):
-
-1. **Transport:** Only streamable-http (no stdio/SSE)
-2. **Endpoint:** Fixed to `/mcp` (not configurable)
-3. **Configuration:** Environment variables only (no config.yaml)
-4. **TLS:** Supports env vars for TLS configuration
-5. **Organization ID:** CLI flag `--org-id` for multi-org support
-6. **Port:** Defaults to 8443 instead of 8000
+```bash
+docker-compose logs -f grafana-mcp-server
+```
 
 ## License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
-
-## Links
-
-- [Upstream Project](https://github.com/grafana/mcp-grafana)
-- [Model Context Protocol](https://modelcontextprotocol.io/)
-- [Grafana Service Accounts](https://grafana.com/docs/grafana/latest/administration/service-accounts/)
