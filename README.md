@@ -2,12 +2,6 @@
 
 A self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server for Grafana, configured via environment variables and designed for Docker deployment.
 
-This is a simplified fork of [grafana/mcp-grafana](https://github.com/grafana/mcp-grafana) that:
-- Uses **only streamable-http transport** on the `/mcp` endpoint
-- Configures via **.env file**
-- Defaults to **port 8443**
-- Supports **TLS via environment variables**
-
 ## Available Tools
 
 | Category | Tool | Description |
@@ -38,6 +32,8 @@ This is a simplified fork of [grafana/mcp-grafana](https://github.com/grafana/mc
 | **Alerting** | `list_alert_rules` | List alert rules with state and labels |
 | | `get_alert_rule_by_uid` | Get full alert rule configuration |
 | | `list_contact_points` | List notification contact points |
+| | `list_alert_groups` | List IRM alert groups |
+| | `get_alert_group` | Get alert group details |
 | **Incident** | `list_incidents` | List incidents (active, resolved, drill) |
 | | `get_incident` | Get incident details by ID |
 | **OnCall** | `list_oncall_schedules` | List OnCall schedules |
@@ -45,8 +41,6 @@ This is a simplified fork of [grafana/mcp-grafana](https://github.com/grafana/mc
 | | `get_current_oncall_users` | Get users currently on-call |
 | | `list_oncall_teams` | List OnCall teams |
 | | `list_oncall_users` | List OnCall users |
-| | `list_alert_groups` | List IRM alert groups |
-| | `get_alert_group` | Get alert group details |
 | **Sift** | `list_sift_investigations` | List Sift investigations |
 | | `get_sift_investigation` | Get investigation by UUID |
 | | `get_sift_analysis` | Get specific analysis from investigation |

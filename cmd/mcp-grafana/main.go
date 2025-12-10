@@ -292,6 +292,11 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func handleTest(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
 func run(addr string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig, auth mcpgrafana.AuthConfig) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 	s, _ := newServer(dt)
@@ -328,6 +333,7 @@ func run(addr string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.Grafa
 	mux := http.NewServeMux()
 	mux.Handle(endpointPath, srv)
 	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/test", handleTest)
 
 	// Apply Bearer token authentication middleware if configured
 	if auth.Token != "" {
